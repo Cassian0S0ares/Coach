@@ -32,8 +32,10 @@ class RiotClient:
             if r.status_code == 429:  # rate limit
                 time.sleep(int(r.headers.get("Retry-After", "2")))
                 continue
-            if r.status_code in (401, 403):
-                raise RiotError("API key inválida ou expirada (chaves de dev expiram a cada 24h).")
+            if r.status_code == 401:
+                raise RiotError("A Riot não recebeu a chave da API (HTTP 401). Verifique RIOT_API_KEY no .env.")
+            if r.status_code == 403:
+                raise RiotError("A Riot recusou o acesso (HTTP 403). Confira a chave e as permissões no portal de desenvolvedores.")
             if r.status_code == 404:
                 raise RiotError(f"Não encontrado: {path}")
             r.raise_for_status()

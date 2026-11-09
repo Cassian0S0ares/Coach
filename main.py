@@ -10,7 +10,7 @@ from coach.riot import RiotClient, RiotError
 
 
 def main():
-    load_dotenv()
+    load_dotenv(override=True)
     ap = argparse.ArgumentParser(description="Coach de LoL")
     ap.add_argument("riot_id", help='Seu Riot ID, ex: "Fulano#BR1"')
     ap.add_argument("--region", default="br1")
