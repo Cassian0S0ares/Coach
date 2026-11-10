@@ -5,6 +5,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from coach import meta
 from coach.analysis import analyze
 from coach.riot import RiotClient, RiotError
 
@@ -16,6 +17,8 @@ def main():
     ap.add_argument("--region", default="br1")
     ap.add_argument("--count", type=int, default=1, help="quantas partidas recentes analisar")
     ap.add_argument("--queue", type=int, default=None, help="420=solo/duo, 440=flex")
+    ap.add_argument("--refresh-meta", type=int, metavar="N", default=0,
+                    help="baixa N partidas novas de elo alto para atualizar o meta antes de analisar")
     ap.add_argument("--no-ai", action="store_true", help="só métricas, sem chamar o Claude")
     args = ap.parse_args()
 
@@ -29,13 +32,15 @@ def main():
 
     try:
         riot = RiotClient(key, args.region)
+        if args.refresh_meta:
+            meta.refresh(RiotClient(key, args.region, min_interval=1.25), args.refresh_meta)
         puuid = riot.get_puuid(name, tag)
         ids = riot.get_match_ids(puuid, args.count, args.queue)
         if not ids:
             sys.exit("Nenhuma partida encontrada.")
 
         for mid in ids:
-            report = analyze(riot.get_match(mid), riot.get_timeline(mid), puuid)
+            report = analyze(riot.get_match(mid), riot.get_timeline(mid), puuid, meta.load())
             print(f"\n{'=' * 60}\n{report.match_id} — {report.champion} ({report.role}) "
                   f"{'VITÓRIA' if report.win else 'DERROTA'} | KDA {report.kda} | {report.minutes} min")
             print(f"CS/min {report.cs_per_min} | Visão/min {report.vision_per_min} | "

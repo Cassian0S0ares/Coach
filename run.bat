@@ -27,7 +27,7 @@ if not defined PYTHON (
     exit /b 1
 )
 
-%PYTHON% -c "import requests, dotenv" >nul 2>&1
+%PYTHON% -c "import requests, dotenv, edge_tts" >nul 2>&1
 if errorlevel 1 (
     echo Instalando dependencias...
     %PYTHON% -m pip install -r requirements.txt
@@ -37,6 +37,13 @@ if errorlevel 1 (
         exit /b 1
     )
 )
+
+rem Atualiza o meta (partidas de elo alto do patch atual) em uma janela minimizada, 3 passadas em sequencia.
+rem O servidor nao atualiza por conta propria aqui, para dois processos nao gravarem o mesmo cache.
+rem Aumente ou diminua o numero de passadas e de partidas (--matches) conforme sua chave da Riot.
+echo Atualizando o meta em segundo plano (janela minimizada)...
+start "Rift Coach - meta" /min cmd /c "%PYTHON% -m coach.meta --matches 60 & %PYTHON% -m coach.meta --matches 60 & %PYTHON% -m coach.meta --matches 60"
+set "META_AUTO_REFRESH=0"
 
 echo Iniciando Rift Coach em http://127.0.0.1:8000
 start "" /min powershell -NoProfile -Command "Start-Sleep -Seconds 2; Start-Process 'http://127.0.0.1:8000'"

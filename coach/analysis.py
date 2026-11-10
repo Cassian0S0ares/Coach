@@ -9,7 +9,11 @@ Limite: a Riot só dá UMA posição por minuto por jogador; entre os frames a
 posição é interpolada linearmente, então tudo é aproximado.
 """
 import math
+import os
 from dataclasses import dataclass, field
+
+from coach import meta as meta_mod
+from coach import tactics
 
 # Referências aproximadas (elo médio) por posição. Ajuste conforme seu elo.
 BENCH = {
@@ -20,6 +24,10 @@ BENCH = {
     "BOTTOM":  (7.2, 0.9),
     "UTILITY": (1.2, 2.2),
 }
+
+# O meta vem de Challenger/GM/Master; a régua é uma fração do que os vencedores fazem lá.
+META_BENCH_FACTOR = float(os.getenv("META_BENCH_FACTOR", "0.8"))
+MIN_ITEM_CHECK_MIN = 25   # só cobra itens centrais em partidas longas
 
 MAP_SIDE = 14870          # x + y == MAP_SIDE é a diagonal do rio
 ENEMY_ZONE = 2500         # quão além do rio conta como "território"
@@ -84,6 +92,11 @@ class MatchReport:
     team_damage_share: float | None
     # comparação com oponente de lane (None se não encontrado)
     opponent: str | None = None
+    side: str = ""                  # "azul" (time 100) ou "vermelho" (time 200)
+    wards_placed: int = 0
+    wards_killed: int = 0
+    control_wards_placed: int = 0
+    shop_times: list[str] = field(default_factory=list)   # quando foi à loja (aprox. quando voltou à base)
     gold_diff_10: int | None = None
     gold_diff_15: int | None = None
     cs_diff_10: int | None = None
@@ -96,6 +109,7 @@ class MatchReport:
     teamfights: list[Teamfight] = field(default_factory=list)
     objectives: list[Objective] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
+    meta: dict = field(default_factory=dict)   # contexto do meta vivo (vazio se não houver cache)
 
 
 # ---------------------------------------------------------------- helpers
@@ -167,7 +181,7 @@ def _cluster_fights(kills: list[dict]) -> list[list[dict]]:
 
 # ---------------------------------------------------------------- análise
 
-def analyze(match: dict, timeline: dict, puuid: str) -> MatchReport:
+def analyze(match: dict, timeline: dict, puuid: str, meta: dict | None = None) -> MatchReport:
     info = match["info"]
     me = next(p for p in info["participants"] if p["puuid"] == puuid)
     pid, my_team = me["participantId"], me["teamId"]
@@ -188,6 +202,10 @@ def analyze(match: dict, timeline: dict, puuid: str) -> MatchReport:
         cs_per_min=round(cs / minutes, 2),
         vision_per_min=round(me["visionScore"] / minutes, 2),
         control_wards=me.get("visionWardsBoughtInGame", 0),
+        side="azul" if my_team == 100 else "vermelho",
+        wards_placed=me.get("wardsPlaced", 0),
+        wards_killed=me.get("wardsKilled", 0),
+        control_wards_placed=me.get("detectorWardsPlaced", 0),
         kill_participation=ch.get("killParticipation"),
         team_damage_share=ch.get("teamDamagePercentage"),
     )
@@ -210,6 +228,14 @@ def analyze(match: dict, timeline: dict, puuid: str) -> MatchReport:
     team_of = {p["participantId"]: p["teamId"] for p in info["participants"]}
     events = sorted((e for f in frames for e in f["events"]), key=lambda e: e["timestamp"])
     kills = [e for e in events if e["type"] == "CHAMPION_KILL" and e.get("position")]
+    # idas à loja: compras separadas por mais de 40s; a primeira (início do jogo) é ignorada
+    buys = [e["timestamp"] for e in events if e["type"] == "ITEM_PURCHASED" and e.get("participantId") == pid]
+    shops, last = [], None
+    for t in buys:
+        if last is None or t - last > 40_000:
+            shops.append(t)
+        last = t
+    rep.shop_times = [_fmt(t) for t in shops if t > 60_000][:15]
     my_death_ts = [e["timestamp"] for e in kills if e["victimId"] == pid]
 
     def dead_recently(ts: float) -> bool:
@@ -305,6 +331,15 @@ def analyze(match: dict, timeline: dict, puuid: str) -> MatchReport:
             followed_by_enemy_objective=f"{nxt[1].kind} (+{int((nxt[0] - ts) / 1000)}s)" if nxt else None,
         ))
 
+    my_items = [me[f"item{n}"] for n in range(6) if me.get(f"item{n}")]
+    rep.meta = meta_mod.context(meta, role, me["championName"], rep.opponent, my_items,
+                                {"me": me, "timeline": timeline})
+    rep.meta["game_minutes"] = rep.minutes
+    try:
+        rep.meta["tactics"] = tactics.analyze(match, timeline, me, (meta or {}).get("tactics"),
+                                              (meta or {}).get("ddragon_version"), my_items)
+    except Exception:  # dados táticos são um bônus: nunca derrubam o relatório
+        rep.meta["tactics"] = {}
     rep.issues = _detect_issues(rep)
     return rep
 
@@ -314,11 +349,16 @@ def analyze(match: dict, timeline: dict, puuid: str) -> MatchReport:
 def _detect_issues(r: MatchReport) -> list[str]:
     issues = []
     cs_bench, vis_bench = BENCH.get(r.role, (6.5, 0.9))
+    src = "referência fixa"
+    wb = r.meta.get("role_benchmark_winners") if r.meta else None
+    if wb and wb.get("cs_min") and wb.get("vision_min"):
+        cs_bench, vis_bench = round(wb["cs_min"] * META_BENCH_FACTOR, 2), round(wb["vision_min"] * META_BENCH_FACTOR, 2)
+        src = f"meta: vencedores de elo alto x{META_BENCH_FACTOR}"
 
     if r.cs_per_min < cs_bench * 0.85 and r.role != "UTILITY":
-        issues.append(f"Farm baixo: {r.cs_per_min} CS/min (referência ~{cs_bench}).")
+        issues.append(f"Farm baixo: {r.cs_per_min} CS/min ({src}: ~{cs_bench}).")
     if r.vision_per_min < vis_bench * 0.7:
-        issues.append(f"Pouca visão: {r.vision_per_min}/min (referência ~{vis_bench}).")
+        issues.append(f"Pouca visão: {r.vision_per_min}/min ({src}: ~{vis_bench}).")
     if r.control_wards < max(1, r.minutes // 8) and r.role != "UTILITY":
         issues.append(f"Poucos control wards comprados ({r.control_wards}).")
     if r.deaths_early >= 2:
@@ -333,6 +373,41 @@ def _detect_issues(r: MatchReport) -> list[str]:
         issues.append(f"Participação em abates baixa ({r.kill_participation:.0%}).")
     if r.kda_ratio < 2 and r.role != "UTILITY":
         issues.append(f"KDA baixo ({r.kda}, ratio {r.kda_ratio}).")
+
+    # --- meta: build e campeão ---
+    items = r.meta.get("items") if r.meta else None
+    if items and r.minutes >= MIN_ITEM_CHECK_MIN and len(items["core_missing"]) >= 2:
+        issues.append(
+            "Build fora do meta do campeão: faltaram itens centrais "
+            + ", ".join(items["core_missing"][:3]) + f" (construiu: {', '.join(items['built']) or 'nenhum item final'})."
+        )
+    mc = r.meta.get("my_champion") if r.meta else None
+    if mc and mc["tier"] in ("C", "D") and mc["games"] >= 15:
+        issues.append(
+            f"{mc['name']} está fraco no patch atual (tier {mc['tier']}, WR {mc['winrate']:.0%} em {mc['games']} jogos) "
+            "— dependa mais de execução e do matchup."
+        )
+
+    m = r.meta or {}
+    spells = m.get("summoner_spells")
+    if spells and not spells.get("has_flash"):
+        issues.append(f"Sem Flash nos feitiços ({spells['mine']}); o padrão do campeão é {spells['meta']}.")
+    elif spells and spells.get("my_rate", 1) < 0.1:
+        issues.append(f"Feitiços incomuns ({spells['mine']}); o padrão do campeão é {spells['meta']}.")
+    ft = m.get("first_item_timing")
+    if ft and ft.get("my_min") and ft["my_min"] > ft["meta_median_min"] + 3:
+        issues.append(
+            f"Primeiro item completo aos {ft['my_min']:.0f} min ({ft['my_first_item']}); "
+            f"o elo alto fecha por volta dos {ft['meta_median_min']:.0f} min — farm/recall atrasados."
+        )
+    rn = m.get("runes")
+    if rn and rn.get("my_keystone") and rn.get("my_keystone_rate", 1) < 0.1:
+        issues.append(f"Runa principal incomum ({rn['my_keystone']}); o padrão é {rn['meta_keystone']}.")
+    sk = m.get("skill_order")
+    if sk and sk.get("mine") and sk.get("my_rate", 1) < 0.1:
+        issues.append(f"Ordem de skills incomum ({sk['mine']}); a mais usada é {sk['meta']}.")
+
+    issues.extend(tactics.issues((r.meta or {}).get("tactics") or {}, r.role))
 
     # --- teamfights ---
     fights = r.teamfights

@@ -17,7 +17,7 @@ else
     exit 1
 fi
 
-if ! "$python_bin" -c 'import requests, dotenv' >/dev/null 2>&1; then
+if ! "$python_bin" -c 'import requests, dotenv, edge_tts' >/dev/null 2>&1; then
     if [[ "$python_bin" != .venv/bin/python ]]; then
         python3 -m venv .venv
         python_bin=.venv/bin/python

@@ -67,6 +67,15 @@
     .issues li { margin-bottom:13px; padding-left:4px; }
     .empty { color:var(--muted); line-height:1.6; margin:0; }
     .feedback { margin-top:18px; }
+    .coach-presenter { display:flex; align-items:center; gap:24px; margin-bottom:24px; background:radial-gradient(ellipse at bottom,#24434a,transparent 70%); border-bottom:1px solid var(--line); }
+    .coach-presenter img { width:clamp(130px,28vw,260px); max-width:48%; height:auto; display:block; align-self:end; }
+    .coach-presenter p { color:var(--muted); line-height:1.6; }
+    .coach-presenter strong { color:var(--gold-bright); }
+    .coach-presenter.is-speaking { border-color:var(--teal); box-shadow:0 3px 0 #64c4bb44; }
+    .speech-controls { display:flex; flex-wrap:wrap; align-items:end; gap:12px; margin-bottom:16px; }
+    .speech-controls > div { flex:1 1 180px; }
+    .speech-controls button { white-space:normal; }
+    .speech-status { color:var(--muted); font-size:13px; line-height:1.5; }
     .feedback-body { color:#dce8e7; line-height:1.75; }
     .feedback-body h4 { color:var(--gold-bright); font-size:16px; margin:20px 0 8px; }
     .feedback-body p { margin:8px 0; }
@@ -82,7 +91,7 @@
 </head>
 <body>
   <div class="shell">
-    <header><a class="brand" href="/"><span class="brand-mark"><span>✦</span></span> RIFT COACH</a><span class="header-note">Análise de League of Legends</span></header>
+    <header><a class="brand" href="/"><span class="brand-mark"><span>✦</span></span> RIFT COACH</a><span class="header-note"></span></header>
     <main>
       <section class="intro" aria-labelledby="title">
         <p class="eyebrow">Cada partida ensina algo</p>
@@ -107,7 +116,22 @@
           <article class="card"><h3>Desempenho</h3><div class="metrics" id="metrics"></div></article>
           <article class="card"><h3>Pontos de atenção</h3><div id="issues"></div></article>
         </div>
-        <article class="card feedback"><h3>Visão do coach</h3><div class="feedback-body" id="feedback"></div></article>
+        <article class="card feedback"><h3>Visão do coach</h3>
+          <div class="coach-presenter" id="coach-presenter">
+            <img src="/static/coach-explaining.png" alt="Coach gesticulando enquanto explica a partida" width="1254" height="1254">
+            <div><strong>Sua partida, explicada</strong><p>Ouça a análise e acompanhe os pontos abaixo.</p></div>
+          </div>
+          <div class="speech-controls">
+            <div><label for="speech-voice">Voz</label><select id="speech-voice"><option value="pt-BR-AntonioNeural">Antônio — português brasileiro</option><option value="pt-BR-FranciscaNeural">Francisca — português brasileiro</option></select></div>
+            <div><label for="speech-rate">Velocidade</label><select id="speech-rate"><option value="0.85">Mais devagar</option><option value="1" selected>Normal</option><option value="1.15">Mais rápido</option></select></div>
+            <button type="button" id="speech-play" disabled>Ouvir explicação</button>
+            <button type="button" id="speech-stop" disabled>Parar</button>
+          </div>
+          <p id="speech-status" class="speech-status" role="status" aria-live="polite"></p>
+          <audio id="coach-audio" controls class="hidden" preload="none" aria-label="Explicação do coach"></audio>
+          <p class="speech-status">Voz sintética gratuita. O texto é enviado ao serviço de voz da Microsoft; requer internet.</p>
+          <div class="feedback-body" id="feedback"></div>
+        </article>
         <div class="grid">
           <article class="card"><h3>Lutas em equipe</h3><ul class="detail-list" id="fights"></ul></article>
           <article class="card"><h3>Mortes e objetivos</h3><ul class="detail-list" id="events"></ul></article>
@@ -144,7 +168,74 @@
         else parent.append(document.createTextNode(part));
       });
     }
+    const audio = $('coach-audio');
+    let narration = '', speechRun = 0, speaking = false, speechRequest = null, audioUrl = null;
+    function speechState(message) {
+      $('speech-play').disabled = !narration || speaking;
+      $('speech-stop').disabled = !speaking;
+      $('speech-voice').disabled = speaking;
+      $('speech-rate').disabled = speaking;
+      $('speech-status').textContent = message;
+      $('coach-presenter').classList.toggle('is-speaking', speaking && !audio.paused);
+    }
+    function stopSpeech(message = '') {
+      speechRun++;
+      if (speechRequest) speechRequest.abort();
+      speechRequest = null;
+      audio.pause(); audio.removeAttribute('src'); audio.load();
+      audio.classList.add('hidden');
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      audioUrl = null; speaking = false;
+      speechState(message);
+    }
+    audio.addEventListener('play', () => { speaking = true; speechState('O coach está falando…'); });
+    audio.addEventListener('pause', () => {
+      $('coach-presenter').classList.remove('is-speaking');
+      if (audioUrl && !audio.ended) speechState('Áudio pausado. Use o player para continuar.');
+    });
+    audio.addEventListener('ended', () => { speaking = false; speechState('Explicação concluída.'); });
+    audio.addEventListener('error', () => {
+      if (audioUrl) stopSpeech('Não foi possível tocar o áudio. Clique em Ouvir explicação para tentar novamente.');
+    });
+    $('speech-play').addEventListener('click', async () => {
+      if (!narration || speaking) return;
+      stopSpeech();
+      const run = speechRun;
+      const controller = new AbortController(); speechRequest = controller;
+      const timer = setTimeout(() => controller.abort(), 100000);
+      speaking = true; speechState('Gerando a explicação em áudio…');
+      try {
+        const response = await fetch('/api/speech', {
+          method:'POST', headers:{'Content-Type':'application/json'}, signal:controller.signal,
+          body:JSON.stringify({text:narration,voice:$('speech-voice').value})
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || 'Não foi possível gerar a voz. Reinicie o servidor e tente novamente.');
+        }
+        const blob = await response.blob();
+        if (run !== speechRun) return;
+        audioUrl = URL.createObjectURL(blob); audio.src = audioUrl;
+        audio.playbackRate = Number($('speech-rate').value);
+        audio.classList.remove('hidden');
+        try { await audio.play(); }
+        catch (error) {
+          if (run !== speechRun) return;
+          if (error.name === 'NotAllowedError') speechState('Áudio pronto. Aperte play no player abaixo para ouvir.');
+          else throw error;
+        }
+      } catch (error) {
+        if (run === speechRun) stopSpeech(error.name === 'AbortError' ? 'A geração demorou demais. Tente novamente.' : error.message);
+      } finally {
+        clearTimeout(timer);
+        if (run === speechRun) speechRequest = null;
+      }
+    });
+    $('speech-stop').addEventListener('click', () => stopSpeech('Leitura interrompida.'));
+    window.addEventListener('pagehide', () => stopSpeech());
+    speechState('Clique em Ouvir explicação para iniciar a fala.');
     function render(data) {
+      stopSpeech();
       const r = data.report;
       $('report').classList.remove('hidden'); $('player-name').textContent = data.riot_id;
       $('match-id').textContent = `${r.champion} · ${r.role} · ${r.minutes} min · ${r.match_id}`;
@@ -158,6 +249,10 @@
       if (r.issues.length) { const list = text(issues, 'ul', '', 'issues'); r.issues.forEach(item => text(list, 'li', item)); }
       else text(issues, 'p', 'Nenhum ponto crítico detectado nesta partida.', 'empty');
       renderFeedback(data.feedback);
+      narration = data.feedback
+        ? Array.from($('feedback').children, el => el.textContent).join('. ')
+        : `${r.win ? 'Vitória' : 'Derrota'} de ${r.champion}, em ${r.minutes} minutos. KDA: ${r.kda}. Farm por minuto: ${r.cs_per_min}. Visão por minuto: ${r.vision_per_min}. ${r.issues.length ? 'Pontos de atenção. ' + r.issues.join('. ') : 'Nenhum ponto crítico detectado nesta partida.'}`;
+      speechState('Clique em Ouvir explicação para iniciar a fala.');
       if (data.feedback_error) text($('feedback'), 'p', data.feedback_error, 'empty');
       const fights = $('fights'); fights.replaceChildren();
       if (r.teamfights.length) r.teamfights.forEach(f => text(fights, 'li', `${f.time} · ${f.result} (${f.ally_kills}×${f.ally_deaths}) · ${f.i_died ? 'você morreu' : f.i_participated ? 'você participou' : f.absent ? 'você estava longe' : 'fora da luta'}${f.objective_after ? ' · objetivo: ' + f.objective_after : ''}`));
@@ -172,6 +267,7 @@
     $('report-form').addEventListener('submit', async event => {
       event.preventDefault(); const riotId = $('riot-id').value.trim();
       if (!/^.+#[^#]+$/.test(riotId)) { setStatus('Use o formato Nome#TAG para o Riot ID.'); return; }
+      stopSpeech(); narration = ''; speechState('');
       $('submit-button').disabled = true; $('submit-button').textContent = 'Analisando...';
       $('report').classList.add('hidden'); setStatus('Buscando a partida e preparando sua análise. Isso pode levar alguns instantes.', true);
       try {

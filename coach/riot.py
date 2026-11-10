@@ -18,16 +18,23 @@ class RiotError(Exception):
 
 
 class RiotClient:
-    def __init__(self, api_key: str, platform: str = "br1"):
+    def __init__(self, api_key: str, platform: str = "br1", min_interval: float = 0.0):
         if platform not in CLUSTERS:
             raise RiotError(f"Região desconhecida: {platform}")
+        self.platform = platform
         self.cluster = CLUSTERS[platform]
+        self.min_interval = min_interval  # pausa mínima entre chamadas (respeita chave de desenvolvimento)
+        self._last_call = 0.0
         self.session = requests.Session()
         self.session.headers["X-Riot-Token"] = api_key
 
-    def _get(self, path: str, params: dict | None = None):
-        url = f"https://{self.cluster}.api.riotgames.com{path}"
+    def _get(self, path: str, params: dict | None = None, host: str | None = None):
+        url = f"https://{host or self.cluster}.api.riotgames.com{path}"
         for _ in range(3):
+            wait = self._last_call + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
             r = self.session.get(url, params=params, timeout=15)
             if r.status_code == 429:  # rate limit
                 time.sleep(int(r.headers.get("Retry-After", "2")))
@@ -59,3 +66,18 @@ class RiotClient:
 
     def get_timeline(self, match_id: str) -> dict:
         return self._get(f"/lol/match/v5/matches/{match_id}/timeline")
+
+    # --- League-V4 / Summoner-V4 (usam o host da plataforma, ex.: br1) ---
+    def get_top_league(self, tier: str = "challenger", queue: str = "RANKED_SOLO_5x5") -> list[dict]:
+        """Entradas da liga de elite (challenger/grandmaster/master), ordenadas por PDL."""
+        data = self._get(f"/lol/league/v4/{tier}leagues/by-queue/{queue}", host=self.platform)
+        return sorted(data.get("entries", []), key=lambda e: e.get("leaguePoints", 0), reverse=True)
+
+    def get_puuid_by_summoner(self, summoner_id: str) -> str:
+        return self._get(f"/lol/summoner/v4/summoners/{summoner_id}", host=self.platform)["puuid"]
+
+    def get_match_ids_since(self, puuid: str, count: int, queue: int = 420, start_time: int | None = None) -> list[str]:
+        params = {"start": 0, "count": count, "queue": queue}
+        if start_time:
+            params["startTime"] = start_time
+        return self._get(f"/lol/match/v5/matches/by-puuid/{puuid}/ids", params)
